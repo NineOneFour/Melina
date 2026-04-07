@@ -8,6 +8,9 @@ namespace Melina {
         private Gtk.ToggleButton mode_btn;
         private string?         current_file = null;
         private uint            render_timer = 0;
+        private GLib.FileMonitor? file_monitor = null;
+        private uint            reload_timer = 0;
+        private int64           suppress_monitor_until = 0;  // monotonic usec
 
         public Window (Gtk.Application app, string? filepath = null) {
             Object (application: app);
@@ -199,9 +202,11 @@ namespace Melina {
                 string text;
                 GLib.FileUtils.get_contents (path, out text);
                 editor.set_text (text);
+                editor.buffer.set_modified (false);
                 current_file = path;
                 update_title ();
                 trigger_render ();
+                watch_file (path);
             } catch (GLib.Error e) {
                 show_error ("Could not open file:\n" + e.message);
             }
@@ -209,12 +214,86 @@ namespace Melina {
 
         private void write_file (string path) {
             try {
+                // Suppress the monitor briefly so our own write doesn't trigger a reload.
+                suppress_monitor_until = GLib.get_monotonic_time () + 1000000; // +1s
                 GLib.FileUtils.set_contents (path, editor.get_text ());
+                editor.buffer.set_modified (false);
+                bool new_file = (current_file != path);
                 current_file = path;
                 update_title ();
+                if (new_file) {
+                    watch_file (path);
+                }
             } catch (GLib.Error e) {
                 show_error ("Could not save file:\n" + e.message);
             }
+        }
+
+        // ----------------------------------------------------------- file watching
+
+        private void watch_file (string path) {
+            if (file_monitor != null) {
+                file_monitor.cancel ();
+                file_monitor = null;
+            }
+            try {
+                var gfile = GLib.File.new_for_path (path);
+                file_monitor = gfile.monitor_file (GLib.FileMonitorFlags.NONE, null);
+                file_monitor.changed.connect (on_file_changed);
+            } catch (GLib.Error e) {
+                // best-effort; ignore failures
+            }
+        }
+
+        private void on_file_changed (GLib.File file, GLib.File? other,
+                                      GLib.FileMonitorEvent event_type) {
+            if (event_type != GLib.FileMonitorEvent.CHANGES_DONE_HINT
+                && event_type != GLib.FileMonitorEvent.CREATED
+                && event_type != GLib.FileMonitorEvent.CHANGED) {
+                return;
+            }
+            if (GLib.get_monotonic_time () < suppress_monitor_until) {
+                return;
+            }
+            // Debounce: editors often emit several events per save.
+            if (reload_timer != 0) {
+                GLib.Source.remove (reload_timer);
+            }
+            reload_timer = GLib.Timeout.add (150, () => {
+                reload_timer = 0;
+                reload_from_disk ();
+                return GLib.Source.REMOVE;
+            });
+        }
+
+        private void reload_from_disk () {
+            if (current_file == null) return;
+            // Don't clobber unsaved local edits.
+            if (editor.buffer.get_modified ()) return;
+
+            string text;
+            try {
+                GLib.FileUtils.get_contents (current_file, out text);
+            } catch (GLib.Error e) {
+                return;
+            }
+            if (text == editor.get_text ()) return;
+
+            // Preserve cursor line + scroll position best-effort.
+            Gtk.TextIter insert_iter;
+            editor.buffer.get_iter_at_mark (out insert_iter, editor.buffer.get_insert ());
+            int line = insert_iter.get_line ();
+
+            editor.set_text (text);
+            editor.buffer.set_modified (false);
+
+            int target_line = int.min (line, editor.buffer.get_line_count () - 1);
+            Gtk.TextIter new_iter;
+            editor.buffer.get_iter_at_line (out new_iter, target_line);
+            editor.buffer.place_cursor (new_iter);
+            editor.view.scroll_to_mark (editor.buffer.get_insert (), 0.1, false, 0.0, 0.0);
+
+            trigger_render ();
         }
 
         private void update_title () {

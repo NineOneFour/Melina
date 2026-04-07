@@ -1,53 +1,62 @@
 # Melina
 
-A lightweight markdown editor for Linux with live preview, built with GTK3 and WebKit2GTK.
+A lightweight markdown editor for Linux with live preview, built in Vala with GTK3 and WebKit2GTK.
 
 ## Features
 
 - Split-pane interface with editor and live HTML preview
 - Formatting toolbar (bold, italic, strikethrough, headings, code, links, lists, blockquotes)
 - Live preview with 300ms debounce — renders as you type
+- Live file monitoring — auto-reloads when the open file is changed by another process
 - Keyboard shortcuts for common formatting
 - File management: new, open, save, save as
 - Dark theme preview (Catppuccin)
 
 ## Requirements
 
-- Python 3.10+
 - GTK+ 3.0
 - WebKit2GTK 4.1
-- PyGObject (system package — not installable via pip)
+- cmark
+- Vala compiler + Meson + Ninja
 
 On Arch/Manjaro:
 ```
-sudo pacman -S python-gobject webkit2gtk-4.1
+sudo pacman -S vala meson ninja gtk3 webkit2gtk-4.1 cmark
 ```
 
 On Debian/Ubuntu:
 ```
-sudo apt install python3-gi gir1.2-webkit2-4.1
+sudo apt install valac meson ninja-build libgtk-3-dev libwebkit2gtk-4.1-dev libcmark-dev
 ```
 
-## Installation
-
-Clone the repo and install in a virtual environment with system site packages (required for PyGObject):
+## Build
 
 ```bash
 git clone https://github.com/NineOneFour/Melina.git
 cd melina
-python -m venv --system-site-packages venv
-source venv/bin/activate
-pip install -e .
+meson setup build
+meson compile -C build
 ```
 
-Then run:
+Run it:
 ```bash
-melina
+./build/melina
 ```
 
 Or open a file directly:
 ```bash
-melina notes.md
+./build/melina notes.md
+```
+
+To install system-wide:
+```bash
+meson install -C build
+```
+
+## Rebuilding after code changes
+
+```bash
+meson compile -C build
 ```
 
 ## Keyboard Shortcuts
@@ -57,7 +66,6 @@ melina notes.md
 | `Ctrl+N` | New file |
 | `Ctrl+O` | Open file |
 | `Ctrl+S` | Save |
-| `Ctrl+Shift+S` | Save as |
 | `Ctrl+B` | Bold |
 | `Ctrl+I` | Italic |
 
@@ -65,13 +73,14 @@ melina notes.md
 
 ```
 melina/
-├── melina/         # Python/GTK3 implementation
-│   ├── app.py      # Application entry point
-│   ├── window.py   # Main window
-│   ├── editor.py   # Text editor component
-│   ├── toolbar.py  # Formatting toolbar
-│   └── renderer.py # Markdown-to-HTML renderer (WebKit2)
-└── src/            # Vala implementation (in development)
+├── src/              # Vala sources
+│   ├── main.vala
+│   ├── application.vala
+│   ├── window.vala
+│   ├── editor.vala
+│   ├── toolbar.vala
+│   └── renderer.vala
+└── meson.build
 ```
 
 ## License
