@@ -1,7 +1,7 @@
 import os
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Gio
 
 from .editor import Editor
 from .renderer import Renderer
@@ -15,6 +15,9 @@ class AppWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.current_file = None
         self._render_timer = None
+        self._file_monitor = None
+        self._reload_timer = None
+        self._suppress_monitor_until = 0.0  # ignore monitor events from our own writes
 
         self.set_default_size(960, 700)
         self._setup_header()
@@ -205,20 +208,92 @@ class AppWindow(Gtk.ApplicationWindow):
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
             self.editor.set_text(text)
+            self.editor.buffer.set_modified(False)
             self.current_file = path
             self._update_title()
             self._trigger_render()
+            self._watch_file(path)
         except OSError as e:
             self._error_dialog(f"Could not open file:\n{e}")
 
     def _write_file(self, path):
         try:
+            # Suppress the monitor briefly so our own write doesn't trigger a reload.
+            import time
+            self._suppress_monitor_until = time.monotonic() + 1.0
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self.editor.get_text())
+            self.editor.buffer.set_modified(False)
+            new_file = path != self.current_file
             self.current_file = path
             self._update_title()
+            if new_file:
+                self._watch_file(path)
         except OSError as e:
             self._error_dialog(f"Could not save file:\n{e}")
+
+    # ----------------------------------------------------------- file watching
+
+    def _watch_file(self, path):
+        # Drop any prior monitor.
+        if self._file_monitor is not None:
+            self._file_monitor.cancel()
+            self._file_monitor = None
+        try:
+            gfile = Gio.File.new_for_path(path)
+            monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            monitor.connect("changed", self._on_file_changed)
+            self._file_monitor = monitor
+        except GLib.Error:
+            # Monitoring is best-effort; ignore failures.
+            pass
+
+    def _on_file_changed(self, monitor, gfile, other_file, event_type):
+        # Only react to events that indicate the file's contents have settled.
+        if event_type not in (
+            Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+            Gio.FileMonitorEvent.CREATED,
+            Gio.FileMonitorEvent.CHANGED,
+        ):
+            return
+        import time
+        if time.monotonic() < self._suppress_monitor_until:
+            return
+        # Debounce: editors often write multiple events in quick succession.
+        if self._reload_timer:
+            GLib.source_remove(self._reload_timer)
+        self._reload_timer = GLib.timeout_add(150, self._reload_from_disk)
+
+    def _reload_from_disk(self):
+        self._reload_timer = None
+        path = self.current_file
+        if not path:
+            return False
+        # Don't clobber unsaved local edits.
+        if self.editor.buffer.get_modified():
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return False
+        if text == self.editor.get_text():
+            return False
+
+        # Preserve cursor line + scroll position best-effort.
+        buf = self.editor.buffer
+        insert_iter = buf.get_iter_at_mark(buf.get_insert())
+        line = insert_iter.get_line()
+
+        self.editor.set_text(text)
+        buf.set_modified(False)
+
+        new_iter = buf.get_iter_at_line(min(line, buf.get_line_count() - 1))
+        buf.place_cursor(new_iter)
+        self.editor.view.scroll_to_mark(buf.get_insert(), 0.1, False, 0.0, 0.0)
+
+        self._trigger_render()
+        return False
 
     def _confirm_discard(self):
         # For now, always allow (could add dirty tracking later)
